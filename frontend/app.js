@@ -89,7 +89,7 @@ async function loadHealth() {
       `${h.vector_store.chunks} chunk(s) in "${esc(h.vector_store.collection)}" &middot; ` +
       `max ${h.max_revisions} revisions`;
     if (!h.api_key_configured) {
-      $("#submitHint").textContent = "MISTRAL_API_KEY missing in .env";
+      $("#submitHint").textContent = "Azure OpenAI key/endpoint missing in .env";
       $("#submit").disabled = true;
     } else if (h.vector_store.chunks === 0) {
       $("#submitHint").textContent =

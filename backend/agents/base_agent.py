@@ -1,4 +1,4 @@
-"""Shared Mistral helper: JSON-mode chat completion, schema validation, retry, cost log.
+"""Shared Azure OpenAI helper: JSON-mode chat completion, schema validation, retry, cost log.
 
 Every agent goes through `call_json()` so that:
   * the orchestrator never has to parse free text,
@@ -18,29 +18,32 @@ from pydantic import BaseModel, ValidationError
 from backend import config, cost_tracker
 from backend.schemas import ProgrammeState
 
-# mistralai 1.x exposes `Mistral` at the top level; 2.x moved it to `mistralai.client`.
-try:  # pragma: no cover - import shim
-    from mistralai import Mistral
-except ImportError:  # pragma: no cover
-    from mistralai.client import Mistral
+from openai import APIConnectionError, AzureOpenAI, InternalServerError
 
 log = logging.getLogger("agents")
 
 T = TypeVar("T", bound=BaseModel)
 
-_client: Mistral | None = None
+_client: AzureOpenAI | None = None
 
 
 class AgentError(RuntimeError):
     """Raised when an agent cannot produce valid output after all retries."""
 
 
-def client() -> Mistral:
+def client() -> AzureOpenAI:
     global _client
     if _client is None:
         if config.missing_api_key():
-            raise AgentError("MISTRAL_API_KEY is not set — add it to .env")
-        _client = Mistral(api_key=config.MISTRAL_API_KEY)
+            raise AgentError("AZURE_OPENAI_API_KEY / AZURE_OPENAI_ENDPOINT not set — add them to .env")
+        # Retries are handled here (with rate-limit-aware backoff), not by the SDK.
+        _client = AzureOpenAI(
+            api_key=config.AZURE_OPENAI_API_KEY,
+            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+            api_version=config.AZURE_OPENAI_API_VERSION,
+            timeout=config.LLM_TIMEOUT_MS / 1000,
+            max_retries=0,
+        )
     return _client
 
 
@@ -55,6 +58,26 @@ def _is_rate_limit(exc: Exception) -> bool:
             return True
     text = str(exc).lower()
     return "429" in text or "rate limit" in text or "capacity exceeded" in text
+
+
+def _describe(exc: BaseException | None) -> str:
+    """Error text with the underlying cause chain — the SDK's 'Connection error.' alone
+    hides whether it was DNS, TLS, a proxy or a refused socket."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        parts.append(f"{type(exc).__name__}: {exc}".strip(": "))
+        exc = exc.__cause__ or exc.__context__
+    return " <- ".join(parts) or "unknown error"
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Network drops, timeouts and 5xx are worth waiting out just like a 429."""
+    if isinstance(exc, (APIConnectionError, InternalServerError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status >= 500
 
 
 def _sleep_for(exc: Exception, attempt: int, rate_limited: bool) -> float:
@@ -82,7 +105,7 @@ def call_json(
     output_model: Type[T],
     temperature: float = 0.3,
 ) -> T:
-    """Call Mistral in JSON mode and return a validated `output_model` instance.
+    """Call Azure OpenAI in JSON mode and return a validated `output_model` instance.
 
     Retries on API errors *and* on schema-invalid responses (the retry prompt carries
     the validation error back to the model).
@@ -108,8 +131,9 @@ def call_json(
         attempt += 1
         raw: Any = ""
         rate_limited = False
+        transient = False
         try:
-            resp = client().chat.complete(
+            resp = client().chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -147,23 +171,24 @@ def call_json(
         except Exception as exc:  # API/network/rate-limit errors
             last_error = exc
             rate_limited = _is_rate_limit(exc)
-            if rate_limited:
+            transient = _is_transient(exc)
+            if rate_limited or transient:
                 budget = max(budget, config.LLM_RATE_LIMIT_ATTEMPTS)
             log.warning(
                 "%s: %s on attempt %s/%s: %s",
                 agent,
-                "RATE LIMIT" if rate_limited else "API error",
+                "RATE LIMIT" if rate_limited else "TRANSIENT" if transient else "API error",
                 attempt,
                 budget,
-                exc,
+                _describe(exc),
             )
 
         if attempt < budget:
-            delay = _sleep_for(last_error, attempt, rate_limited)
+            delay = _sleep_for(last_error, attempt, rate_limited or transient)
             log.info("%s: retrying in %.1fs", agent, delay)
             time.sleep(delay)
 
-    raise AgentError(f"{agent} failed after {attempt} attempts: {last_error}")
+    raise AgentError(f"{agent} failed after {attempt} attempts: {_describe(last_error)}")
 
 
 def _strip_fences(text: str) -> str:
@@ -177,15 +202,18 @@ def _strip_fences(text: str) -> str:
 
 
 def embed(state: ProgrammeState, texts: list[str], agent: str = "content") -> list[list[float]]:
-    """Embed texts with `mistral-embed`, retrying and logging cost like chat calls."""
+    """Embed texts with the Azure embedding deployment, retrying and logging cost like chat calls."""
+    if config.EMBED_MODEL == "local":
+        return _embed_local(texts)
     budget = max(1, config.LLM_MAX_ATTEMPTS)
     last_error: Exception | None = None
     attempt = 0
     while attempt < budget:
         attempt += 1
         rate_limited = False
+        transient = False
         try:
-            resp = client().embeddings.create(model=config.EMBED_MODEL, inputs=texts)
+            resp = client().embeddings.create(model=config.EMBED_MODEL, input=texts)
             prompt_tokens, completion_tokens = _usage(resp)
             cost_tracker.log_call(
                 state.cost_log,
@@ -199,20 +227,34 @@ def embed(state: ProgrammeState, texts: list[str], agent: str = "content") -> li
         except Exception as exc:
             last_error = exc
             rate_limited = _is_rate_limit(exc)
-            if rate_limited:
+            transient = _is_transient(exc)
+            if rate_limited or transient:
                 budget = max(budget, config.LLM_RATE_LIMIT_ATTEMPTS)
             log.warning(
                 "embed: %s on attempt %s/%s: %s",
-                "RATE LIMIT" if rate_limited else "error",
+                "RATE LIMIT" if rate_limited else "TRANSIENT" if transient else "error",
                 attempt,
                 budget,
-                exc,
+                _describe(exc),
             )
             if attempt < budget:
-                delay = _sleep_for(exc, attempt, rate_limited)
+                delay = _sleep_for(exc, attempt, rate_limited or transient)
                 log.info("embed: retrying in %.1fs", delay)
                 time.sleep(delay)
-    raise AgentError(f"embedding failed after {attempt} attempts: {last_error}")
+    raise AgentError(f"embedding failed after {attempt} attempts: {_describe(last_error)}")
+
+
+_local_ef: Any = None
+
+
+def _embed_local(texts: list[str]) -> list[list[float]]:
+    """Chroma's bundled ONNX model — no API call, no cost to log."""
+    global _local_ef
+    if _local_ef is None:
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+        _local_ef = DefaultEmbeddingFunction()
+    return [[float(x) for x in v] for v in _local_ef(texts)]
 
 
 def feedback_block(state: ProgrammeState, owner: str) -> str:

@@ -1,14 +1,19 @@
 """FastAPI app: routes + static frontend.
 
 Run from the project root:
-    uvicorn backend.main:app --reload
+    python -m uvicorn backend.main:app --reload
 Then open http://127.0.0.1:8000/
+
+Use `python -m uvicorn`, not the `uvicorn` launcher: on Windows machines with endpoint
+security (Kaspersky), processes spawned via pip's Scripts\\*.exe stubs cannot resolve DNS.
 """
 
 from __future__ import annotations
 
 import logging
+import socket
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,11 +29,38 @@ logging.basicConfig(
 )
 log = logging.getLogger("api")
 
+
+def _check_endpoint_resolves() -> None:
+    """Fail loudly at boot if this process cannot resolve the Azure host.
+
+    Seen in the wild: a server started via the `uvicorn.exe` launcher on a Kaspersky-managed
+    Windows laptop had the DNS resolver denied for its whole process tree (getaddrinfo 11001,
+    even for `localhost`), so every agent call died with a bare "Connection error". The same
+    code run via `python -m uvicorn` worked. Name the cause and the fix up front instead of
+    letting the first run fail after minutes of retries.
+    """
+    host = urlparse(config.AZURE_OPENAI_ENDPOINT).hostname
+    if not host:
+        return
+    try:
+        socket.getaddrinfo(host, 443)
+    except socket.gaierror as exc:
+        log.error(
+            "cannot resolve %s from this process (%s) — agent calls will fail. If this is Windows "
+            "and you started the server with the `uvicorn` launcher, start it with "
+            "`python -m uvicorn backend.main:app --reload` instead; otherwise check VPN/DNS.",
+            host,
+            exc,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     config.ensure_dirs()
     if config.missing_api_key():
-        log.warning("MISTRAL_API_KEY is not set — agent calls will fail.")
+        log.warning("Azure OpenAI key/endpoint not set — agent calls will fail.")
+    else:
+        _check_endpoint_resolves()
 
     try:
         archive.init()
@@ -111,7 +143,7 @@ def _require(run_id: str) -> ProgrammeState:
 @app.post("/api/programmes", status_code=202)
 def create_programme(body: CreateProgrammeRequest, background: BackgroundTasks) -> dict:
     if config.missing_api_key():
-        raise HTTPException(status_code=503, detail="MISTRAL_API_KEY is not configured")
+        raise HTTPException(status_code=503, detail="Azure OpenAI is not configured")
 
     state = orchestrator.start_run(body.manager_request)
     # Background so the frontend can poll and watch each agent complete.

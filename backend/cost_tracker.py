@@ -1,7 +1,7 @@
 """Token/cost accounting.
 
 Prices are USD per 1M tokens and are ESTIMATES for teaching purposes — verify against
-https://mistral.ai/pricing before using these numbers for anything that matters.
+Azure OpenAI pricing before using these numbers for anything that matters.
 """
 
 from __future__ import annotations
@@ -9,9 +9,11 @@ from __future__ import annotations
 from typing import Any
 
 PRICING_USD_PER_MTOK: dict[str, dict[str, float]] = {
-    "mistral-large-latest": {"input": 2.00, "output": 6.00},
-    "mistral-small-latest": {"input": 0.10, "output": 0.30},
-    "mistral-embed": {"input": 0.10, "output": 0.00},
+    # Keyed by *deployment* name — rename these to match your Azure deployments.
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "text-embedding-3-small": {"input": 0.02, "output": 0.00},
+    "text-embedding-3-large": {"input": 0.13, "output": 0.00},
 }
 _FALLBACK = {"input": 1.00, "output": 3.00}
 

@@ -1,13 +1,14 @@
 """ChromaDB persistent client for the `learning_materials` collection.
 
-Embeddings are always supplied explicitly (from `mistral-embed`), so Chroma's own
-default embedding function is never invoked.
+Embeddings are always supplied explicitly (Azure OpenAI embedding deployment, or the local
+fallback in base_agent), so the collection's own embedding function is never invoked.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 # Must be set before chromadb imports its telemetry module, otherwise chroma 0.5.x
@@ -30,10 +31,20 @@ def client() -> chromadb.ClientAPI:
     global _client
     if _client is None:
         config.ensure_dirs()
-        _client = chromadb.PersistentClient(
-            path=str(config.CHROMA_PERSIST_DIR),
-            settings=Settings(anonymized_telemetry=False, allow_reset=True),
-        )
+        # On Windows, antivirus can briefly lock chromadb's migration .sql files while it
+        # opens them, raising a transient PermissionError — retry rather than fail startup.
+        for attempt in range(1, 6):
+            try:
+                _client = chromadb.PersistentClient(
+                    path=str(config.CHROMA_PERSIST_DIR),
+                    settings=Settings(anonymized_telemetry=False, allow_reset=True),
+                )
+                break
+            except PermissionError as exc:
+                if attempt == 5:
+                    raise
+                log.info("chroma locked (%s), retrying in %ss", exc.filename, attempt)
+                time.sleep(attempt)
     return _client
 
 

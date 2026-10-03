@@ -53,7 +53,7 @@ def chunk(text: str, size: int = MAX_CHARS) -> list[str]:
 
 def main(reset: bool = False) -> int:
     if config.missing_api_key():
-        print("ERROR: MISTRAL_API_KEY missing — set it in .env", file=sys.stderr)
+        print("ERROR: AZURE_OPENAI_API_KEY / AZURE_OPENAI_ENDPOINT missing — set them in .env", file=sys.stderr)
         return 1
 
     files = sorted(MATERIALS_DIR.glob("*.md"))

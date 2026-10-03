@@ -1,6 +1,6 @@
 """Content Agent — RAG over the learning-materials library.
 
-For each curriculum module: embed its objectives with `mistral-embed`, retrieve top-k
+For each curriculum module: embed its objectives with the Azure embedding deployment, retrieve top-k
 from ChromaDB, then ask a cheap model to decide reuse-vs-gap. One LLM call for the
 whole mapping keeps cost down; retrieval is per-module for precision.
 """

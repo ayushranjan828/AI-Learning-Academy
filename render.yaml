@@ -13,7 +13,15 @@ services:
     autoDeploy: true
     envVars:
       # Set in the Render dashboard, never committed.
-      - key: MISTRAL_API_KEY
+      - key: AZURE_OPENAI_API_KEY
+        sync: false
+      - key: AZURE_OPENAI_ENDPOINT
+        sync: false
+      - key: AZURE_OPENAI_API_VERSION
+        sync: false
+      - key: AZURE_OPENAI_DEPLOYMENT
+        sync: false
+      - key: AZURE_OPENAI_EMBED_DEPLOYMENT
         sync: false
       - key: PYTHON_VERSION
         value: "3.11.9"

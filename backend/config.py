@@ -17,11 +17,29 @@ def _path(env_key: str, default: str) -> Path:
     return p if p.is_absolute() else (ROOT_DIR / p).resolve()
 
 
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip().strip('"').strip("'")
+def _env(*keys: str, default: str = "") -> str:
+    """First non-empty value among `keys` (accepts the VITE_-prefixed names too)."""
+    for key in keys:
+        val = os.getenv(key, "").strip().strip('"').strip("'")
+        if val:
+            return val
+    return default
 
-LLM_MODEL_LARGE = os.getenv("LLM_MODEL_LARGE", "mistral-large-latest")
-LLM_MODEL_SMALL = os.getenv("LLM_MODEL_SMALL", "mistral-small-latest")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "mistral-embed")
+
+AZURE_OPENAI_API_KEY = _env("AZURE_OPENAI_API_KEY", "VITE_AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_ENDPOINT = _env("AZURE_OPENAI_ENDPOINT", "VITE_AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_VERSION = _env(
+    "AZURE_OPENAI_API_VERSION", "VITE_AZURE_OPENAI_API_VERSION", default="2024-10-21"
+)
+AZURE_OPENAI_DEPLOYMENT = _env("AZURE_OPENAI_DEPLOYMENT", "VITE_AZURE_OPENAI_DEPLOYMENT")
+
+# On Azure the `model` argument is the *deployment name*. Both tiers default to the one
+# chat deployment; point them at separate deployments to split large/small work.
+LLM_MODEL_LARGE = _env("LLM_MODEL_LARGE", default=AZURE_OPENAI_DEPLOYMENT)
+LLM_MODEL_SMALL = _env("LLM_MODEL_SMALL", default=AZURE_OPENAI_DEPLOYMENT)
+# Without an Azure embedding deployment, fall back to Chroma's bundled local model
+# (all-MiniLM-L6-v2, ONNX). Re-seed with --reset whenever this changes.
+EMBED_MODEL = _env("AZURE_OPENAI_EMBED_DEPLOYMENT", default="local")
 
 CHROMA_PERSIST_DIR = _path("CHROMA_PERSIST_DIR", "./data/chroma_db")
 RUNS_DIR = _path("RUNS_DIR", "./data/runs")
@@ -68,4 +86,8 @@ def ensure_dirs() -> None:
 
 
 def missing_api_key() -> bool:
-    return not MISTRAL_API_KEY or MISTRAL_API_KEY == "your_key_here"
+    return (
+        not AZURE_OPENAI_API_KEY
+        or AZURE_OPENAI_API_KEY == "your_key_here"
+        or not AZURE_OPENAI_ENDPOINT
+    )
